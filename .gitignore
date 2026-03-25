@@ -1,0 +1,2 @@
+# Environment-specific configuration (contains DC names, OU paths)
+config.json
