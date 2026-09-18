@@ -230,7 +230,13 @@ if (-not $isMember) {
 .\AD-UserManagement.ps1
 ```
 
-1. The login screen appears. Sign in with your domain credentials.
+If PowerShell refuses to run the script ("running scripts is disabled on this system"), the machine has the default `Restricted` execution policy. Launch it with a bypass instead - this only affects that one process:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\AD-UserManagement.ps1
+```
+
+1. The login screen appears. Sign in with your domain credentials. These credentials are used for every AD operation, so you can be logged on to the workstation as a standard user and sign in to the tool with your delegated admin account. A bare username is treated as `user@<AD Domain FQDN>`; `DOMAIN\user` and `user@domain` forms also work.
 2. The tool connects to the Domain Controller and loads the user list.
 3. Use the tabs to manage users, create new accounts, or manage group membership.
 
@@ -269,3 +275,9 @@ The tab is hidden when `SecurityGroupDN` is blank in `config.json`. Re-run the c
 
 **"Invalid username or password" at login**
 The tool authenticates against the domain specified in `DomainFQDN`. Verify this matches your AD domain (e.g. `ad.contoso.com`, not just `contoso.com`).
+
+**Login succeeds but "Error connecting to Domain Controller" follows**
+The credentials passed the domain check but WinRM rejected them. Kerberos needs the DC's FQDN (not an IP or short name) in `config.json`, and the signed-in account must be allowed to connect - by default that means membership in the DC's local **Remote Management Users** or **Administrators** group. Test with:
+```powershell
+Enter-PSSession -ComputerName DC01.ad.contoso.com -Credential (Get-Credential)
+```

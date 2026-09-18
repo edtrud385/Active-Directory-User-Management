@@ -4,8 +4,8 @@
     Run this ONCE before using AD-UserManagement.ps1 to generate your config.json.
 
 .NOTES
-    Version: 1.0
-    Run as Administrator on your management workstation.
+    Version: 1.1.0
+    No elevation required - the wizard only writes config.json next to itself.
 #>
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -15,7 +15,7 @@ $configPath = Join-Path $PSScriptRoot "config.json"
 
 $wizForm = New-Object System.Windows.Forms.Form
 $wizForm.Text = "AD User Management - Configuration Wizard"
-$wizForm.Size = New-Object System.Drawing.Size(620, 520)
+$wizForm.ClientSize = New-Object System.Drawing.Size(620, 615)
 $wizForm.StartPosition = "CenterScreen"
 $wizForm.FormBorderStyle = "FixedDialog"
 $wizForm.MaximizeBox = $false
@@ -50,21 +50,22 @@ function Add-ConfigField {
     $lbl.AutoSize = $true
     $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
     $Form.Controls.Add($lbl)
+    if ($HelpText) {
+        # Help text sits on the label row so it never runs past the form edge
+        $hlp = New-Object System.Windows.Forms.Label
+        $hlp.Text = $HelpText
+        $hlp.Location = New-Object System.Drawing.Point((20 + $lbl.PreferredWidth + 8), ($Y.Value + 1))
+        $hlp.AutoSize = $true
+        $hlp.ForeColor = [System.Drawing.Color]::Gray
+        $hlp.Font = New-Object System.Drawing.Font("Segoe UI", 8)
+        $Form.Controls.Add($hlp)
+    }
     $Y.Value += 20
     $txt = New-Object System.Windows.Forms.TextBox
     $txt.Location = New-Object System.Drawing.Point(20, $Y.Value)
     $txt.Size = New-Object System.Drawing.Size($TextWidth, 25)
     $txt.Text = $DefaultValue
     $Form.Controls.Add($txt)
-    if ($HelpText) {
-        $hlp = New-Object System.Windows.Forms.Label
-        $hlp.Text = $HelpText
-        $hlp.Location = New-Object System.Drawing.Point(($TextWidth + 30), ($Y.Value + 3))
-        $hlp.AutoSize = $true
-        $hlp.ForeColor = [System.Drawing.Color]::Gray
-        $hlp.Font = New-Object System.Drawing.Font("Segoe UI", 8)
-        $Form.Controls.Add($hlp)
-    }
     $Y.Value += 32
     return $txt
 }
@@ -162,6 +163,8 @@ $btnCancel.FlatStyle = "Flat"
 $wizForm.Controls.Add($btnCancel)
 
 $btnCancel.Add_Click({ $wizForm.Close() })
+$wizForm.AcceptButton = $btnSave
+$wizForm.CancelButton = $btnCancel
 
 $btnSave.Add_Click({
     $missing = @()

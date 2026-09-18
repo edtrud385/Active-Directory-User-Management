@@ -1,5 +1,33 @@
+<#
+.SYNOPSIS
+    GUI tool for managing Active Directory users, passwords, and security group membership.
+
+.DESCRIPTION
+    Windows Forms front end for common helpdesk AD tasks: list and edit users, reset
+    passwords, enable/disable accounts (moving them between OUs), create new users, and
+    manage membership in one configurable security group.
+
+    All AD operations run on the Domain Controller via PowerShell Remoting using the
+    credentials entered at the login screen, so no local RSAT install is required.
+    Environment-specific values come from config.json - run Configure-ADUserMgmt.ps1
+    first to generate it.
+
+.EXAMPLE
+    .\AD-UserManagement.ps1
+
+.EXAMPLE
+    powershell.exe -ExecutionPolicy Bypass -File .\AD-UserManagement.ps1
+
+.NOTES
+    Version: 1.1.0
+    Requires PowerShell 5.1+, WinRM access to the DC, and delegated rights on the target OUs.
+    See README.md and SETUP.md for setup and delegation guidance.
+#>
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+$script:Version = "1.1.0"
 
 # ============================================================================
 # LOAD CONFIGURATION FROM config.json
@@ -121,7 +149,8 @@ function Show-LoginForm {
     $txtLoginUser.Location = New-Object System.Drawing.Point(40, ($yStart + 22))
     $txtLoginUser.Size = New-Object System.Drawing.Size(320, 28)
     $txtLoginUser.Font = New-Object System.Drawing.Font("Segoe UI", 11)
-    $txtLoginUser.Text = $env:USERNAME
+    # On re-auth, offer the account that signed in rather than the Windows session user
+    $txtLoginUser.Text = if ($script:AuthenticatedUser) { $script:AuthenticatedUser } else { $env:USERNAME }
     $loginForm.Controls.Add($txtLoginUser)
     
     $lblDomainHint = New-Object System.Windows.Forms.Label
@@ -186,6 +215,14 @@ function Show-LoginForm {
         $isValid = Test-DomainCredentials -Username $username -Password $password -Domain $Config.DomainFQDN
         
         if ($isValid) {
+            # Keep the credential for every Invoke-Command so AD operations run as the
+            # account that signed in, not the Windows session that launched the tool.
+            # Bare usernames get the AD domain appended (implicit UPN, valid for Kerberos);
+            # DOMAIN\user and user@domain forms are passed through unchanged.
+            $credUser = if ($username -match '[@\\]') { $username } else { "$username@$($Config.DomainFQDN)" }
+            $script:Credential = New-Object System.Management.Automation.PSCredential(
+                $credUser, (ConvertTo-SecureString $password -AsPlainText -Force)
+            )
             $script:LoginSuccess = $true
             $script:AuthenticatedUser = $username
             $loginForm.Tag = "SUCCESS"
@@ -228,7 +265,7 @@ function Write-Log {
 function Get-ADUsersList {
     param([string]$SearchBase = $Config.StandardUsersOU, [bool]$IncludeDisabled = $false)
     try {
-        $users = Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+        $users = Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
             param($SearchBase, $IncludeDisabled)
             Import-Module ActiveDirectory
             $filter = if ($IncludeDisabled) { "*" } else { "Enabled -eq `$true" }
@@ -248,9 +285,53 @@ function Get-ADUsersList {
 
 function Generate-SecurePassword {
     param([int]$Length = 12)
-    $chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%"
-    $password = -join ((1..$Length) | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
-    return $password
+    # Ambiguous glyphs (l/I/1, O/0) are left out so the password can be read aloud.
+    $lower   = "abcdefghijkmnopqrstuvwxyz"
+    $upper   = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    $digits  = "23456789"
+    $symbols = "!@#$%"
+    $all     = $lower + $upper + $digits + $symbols
+
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $buf = New-Object byte[] 1
+    function Get-RandomChar([string]$Set) {
+        # Rejection sampling keeps the pick unbiased across the set
+        $limit = 256 - (256 % $Set.Length)
+        do { $rng.GetBytes($buf) } while ($buf[0] -ge $limit)
+        return $Set[$buf[0] % $Set.Length]
+    }
+
+    # One from each class guarantees AD's default complexity rule, then fill the rest
+    $chars = @(
+        (Get-RandomChar $lower), (Get-RandomChar $upper),
+        (Get-RandomChar $digits), (Get-RandomChar $symbols)
+    )
+    while ($chars.Count -lt $Length) { $chars += Get-RandomChar $all }
+
+    # Fisher-Yates shuffle so the guaranteed characters aren't always in front
+    for ($i = $chars.Count - 1; $i -gt 0; $i--) {
+        $limit = 256 - (256 % ($i + 1))
+        do { $rng.GetBytes($buf) } while ($buf[0] -ge $limit)
+        $j = $buf[0] % ($i + 1)
+        $tmp = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $tmp
+    }
+    $rng.Dispose()
+    return -join $chars
+}
+
+function Show-PasswordResult {
+    # Success dialog for create/reset that offers to copy the password so the tech
+    # doesn't have to transcribe it. Copy is opt-in because Windows clipboard history
+    # (Win+V) and cloud clipboard sync would otherwise retain it silently.
+    param([string]$Message, [string]$Password, [string]$Title = "Success")
+    $choice = [System.Windows.Forms.MessageBox]::Show(
+        "$Message`n`nCopy the password to the clipboard?",
+        $Title, "YesNo", "Information"
+    )
+    if ($choice -eq "Yes") {
+        try { [System.Windows.Forms.Clipboard]::SetText($Password) }
+        catch { Write-Log "Could not copy password to clipboard: $_" "WARN" }
+    }
 }
 
 function Set-Progress {
@@ -316,7 +397,7 @@ function Reset-InactivityTimer {
 
 $loginResult = Show-LoginForm -IsTimeout $false
 if ((-not $loginResult) -or (-not $script:LoginSuccess)) {
-    throw "Login cancelled"
+    exit
 }
 
 # ============================================================================
@@ -324,7 +405,7 @@ if ((-not $loginResult) -or (-not $script:LoginSuccess)) {
 # ============================================================================
 
 $script:form = New-Object System.Windows.Forms.Form
-$form.Text = "AD User Management v1.0 [$($script:AuthenticatedUser)]"
+$form.Text = "AD User Management v$($script:Version) [$($script:AuthenticatedUser)]"
 $form.Size = New-Object System.Drawing.Size(1000, 750)
 $form.MinimumSize = New-Object System.Drawing.Size(900, 650)
 $form.StartPosition = "CenterScreen"
@@ -610,12 +691,12 @@ $pnlAppAccess.Text = "Security Group Membership"
 $pnlAppAccess.Location = New-Object System.Drawing.Point(470, 10)
 $pnlAppAccess.Size = New-Object System.Drawing.Size(480, 100)
 
-$chkESlideAccess = New-Object System.Windows.Forms.CheckBox
-$chkESlideAccess.Text = "Add user to $($Config.SecurityGroupName) group"
-$chkESlideAccess.Location = New-Object System.Drawing.Point(20, 35)
-$chkESlideAccess.Size = New-Object System.Drawing.Size(400, 25)
-$chkESlideAccess.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$pnlAppAccess.Controls.Add($chkESlideAccess)
+$chkSecGroupAccess = New-Object System.Windows.Forms.CheckBox
+$chkSecGroupAccess.Text = "Add user to $($Config.SecurityGroupName) group"
+$chkSecGroupAccess.Location = New-Object System.Drawing.Point(20, 35)
+$chkSecGroupAccess.Size = New-Object System.Drawing.Size(400, 25)
+$chkSecGroupAccess.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$pnlAppAccess.Controls.Add($chkSecGroupAccess)
 
 $tabCreate.Controls.Add($pnlAppAccess)
 
@@ -690,69 +771,69 @@ $tabControl.TabPages.Add($tabCreate)
 # TAB 3: SECURITY GROUP MEMBERSHIP
 # ============================================================================
 
-$tabESlide = New-Object System.Windows.Forms.TabPage
-$tabESlide.Text = "Security Group"
-$tabESlide.BackColor = [System.Drawing.Color]::White
+$tabSecGroup = New-Object System.Windows.Forms.TabPage
+$tabSecGroup.Text = "Security Group"
+$tabSecGroup.BackColor = [System.Drawing.Color]::White
 
-$lblSelectUserESlide = New-Object System.Windows.Forms.Label
-$lblSelectUserESlide.Text = "Select User:"
-$lblSelectUserESlide.Location = New-Object System.Drawing.Point(15, 20)
-$lblSelectUserESlide.AutoSize = $true
-$tabESlide.Controls.Add($lblSelectUserESlide)
+$lblSelectUserSecGroup = New-Object System.Windows.Forms.Label
+$lblSelectUserSecGroup.Text = "Select User:"
+$lblSelectUserSecGroup.Location = New-Object System.Drawing.Point(15, 20)
+$lblSelectUserSecGroup.AutoSize = $true
+$tabSecGroup.Controls.Add($lblSelectUserSecGroup)
 
-$script:cmbESlideUser = New-Object System.Windows.Forms.ComboBox
-$script:cmbESlideUser.Location = New-Object System.Drawing.Point(100, 17)
-$script:cmbESlideUser.Size = New-Object System.Drawing.Size(300, 25)
-$script:cmbESlideUser.DropDownStyle = "DropDownList"
-$tabESlide.Controls.Add($script:cmbESlideUser)
+$script:cmbSecGroupUser = New-Object System.Windows.Forms.ComboBox
+$script:cmbSecGroupUser.Location = New-Object System.Drawing.Point(100, 17)
+$script:cmbSecGroupUser.Size = New-Object System.Drawing.Size(300, 25)
+$script:cmbSecGroupUser.DropDownStyle = "DropDownList"
+$tabSecGroup.Controls.Add($script:cmbSecGroupUser)
 
-$btnLoadESlide = New-Object System.Windows.Forms.Button
-$btnLoadESlide.Text = "Load"
-$btnLoadESlide.Location = New-Object System.Drawing.Point(410, 15)
-$btnLoadESlide.Size = New-Object System.Drawing.Size(70, 28)
-$btnLoadESlide.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
-$btnLoadESlide.ForeColor = [System.Drawing.Color]::White
-$btnLoadESlide.FlatStyle = "Flat"
-$tabESlide.Controls.Add($btnLoadESlide)
+$btnLoadSecGroup = New-Object System.Windows.Forms.Button
+$btnLoadSecGroup.Text = "Load"
+$btnLoadSecGroup.Location = New-Object System.Drawing.Point(410, 15)
+$btnLoadSecGroup.Size = New-Object System.Drawing.Size(70, 28)
+$btnLoadSecGroup.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
+$btnLoadSecGroup.ForeColor = [System.Drawing.Color]::White
+$btnLoadSecGroup.FlatStyle = "Flat"
+$tabSecGroup.Controls.Add($btnLoadSecGroup)
 
 # Security Group Panel
-$pnlESlide = New-Object System.Windows.Forms.GroupBox
-$pnlESlide.Text = "$($Config.SecurityGroupName) Membership"
-$pnlESlide.Location = New-Object System.Drawing.Point(15, 60)
-$pnlESlide.Size = New-Object System.Drawing.Size(500, 150)
+$pnlSecGroup = New-Object System.Windows.Forms.GroupBox
+$pnlSecGroup.Text = "$($Config.SecurityGroupName) Membership"
+$pnlSecGroup.Location = New-Object System.Drawing.Point(15, 60)
+$pnlSecGroup.Size = New-Object System.Drawing.Size(500, 150)
 
-$lblESlideStatus = New-Object System.Windows.Forms.Label
-$lblESlideStatus.Text = "Current Status: Not Loaded"
-$lblESlideStatus.Font = New-Object System.Drawing.Font("Segoe UI", 12)
-$lblESlideStatus.Location = New-Object System.Drawing.Point(20, 35)
-$lblESlideStatus.AutoSize = $true
-$pnlESlide.Controls.Add($lblESlideStatus)
+$lblSecGroupStatus = New-Object System.Windows.Forms.Label
+$lblSecGroupStatus.Text = "Current Status: Not Loaded"
+$lblSecGroupStatus.Font = New-Object System.Drawing.Font("Segoe UI", 12)
+$lblSecGroupStatus.Location = New-Object System.Drawing.Point(20, 35)
+$lblSecGroupStatus.AutoSize = $true
+$pnlSecGroup.Controls.Add($lblSecGroupStatus)
 
-$btnGrantESlide = New-Object System.Windows.Forms.Button
-$btnGrantESlide.Text = "Add to Group"
-$btnGrantESlide.Location = New-Object System.Drawing.Point(20, 80)
-$btnGrantESlide.Size = New-Object System.Drawing.Size(180, 40)
-$btnGrantESlide.BackColor = [System.Drawing.Color]::FromArgb(16, 124, 16)
-$btnGrantESlide.ForeColor = [System.Drawing.Color]::White
-$btnGrantESlide.FlatStyle = "Flat"
-$btnGrantESlide.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$pnlESlide.Controls.Add($btnGrantESlide)
+$btnGrantSecGroup = New-Object System.Windows.Forms.Button
+$btnGrantSecGroup.Text = "Add to Group"
+$btnGrantSecGroup.Location = New-Object System.Drawing.Point(20, 80)
+$btnGrantSecGroup.Size = New-Object System.Drawing.Size(180, 40)
+$btnGrantSecGroup.BackColor = [System.Drawing.Color]::FromArgb(16, 124, 16)
+$btnGrantSecGroup.ForeColor = [System.Drawing.Color]::White
+$btnGrantSecGroup.FlatStyle = "Flat"
+$btnGrantSecGroup.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$pnlSecGroup.Controls.Add($btnGrantSecGroup)
 
-$btnRevokeESlide = New-Object System.Windows.Forms.Button
-$btnRevokeESlide.Text = "Remove from Group"
-$btnRevokeESlide.Location = New-Object System.Drawing.Point(220, 80)
-$btnRevokeESlide.Size = New-Object System.Drawing.Size(180, 40)
-$btnRevokeESlide.BackColor = [System.Drawing.Color]::FromArgb(209, 52, 56)
-$btnRevokeESlide.ForeColor = [System.Drawing.Color]::White
-$btnRevokeESlide.FlatStyle = "Flat"
-$btnRevokeESlide.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-$pnlESlide.Controls.Add($btnRevokeESlide)
+$btnRevokeSecGroup = New-Object System.Windows.Forms.Button
+$btnRevokeSecGroup.Text = "Remove from Group"
+$btnRevokeSecGroup.Location = New-Object System.Drawing.Point(220, 80)
+$btnRevokeSecGroup.Size = New-Object System.Drawing.Size(180, 40)
+$btnRevokeSecGroup.BackColor = [System.Drawing.Color]::FromArgb(209, 52, 56)
+$btnRevokeSecGroup.ForeColor = [System.Drawing.Color]::White
+$btnRevokeSecGroup.FlatStyle = "Flat"
+$btnRevokeSecGroup.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$pnlSecGroup.Controls.Add($btnRevokeSecGroup)
 
-$tabESlide.Controls.Add($pnlESlide)
+$tabSecGroup.Controls.Add($pnlSecGroup)
 
 # Info
-$lblESlideInfo = New-Object System.Windows.Forms.Label
-$lblESlideInfo.Text = @"
+$lblSecGroupInfo = New-Object System.Windows.Forms.Label
+$lblSecGroupInfo.Text = @"
 Security Group Membership
 
 Manage membership in the configured AD security group.
@@ -762,16 +843,16 @@ Group: $($Config.SecurityGroupDN)
 2. Click 'Load' to check their current membership
 3. Use the buttons to add or remove the user
 "@
-$lblESlideInfo.Location = New-Object System.Drawing.Point(15, 220)
-$lblESlideInfo.Size = New-Object System.Drawing.Size(600, 150)
-$lblESlideInfo.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
-$tabESlide.Controls.Add($lblESlideInfo)
+$lblSecGroupInfo.Location = New-Object System.Drawing.Point(15, 220)
+$lblSecGroupInfo.Size = New-Object System.Drawing.Size(600, 150)
+$lblSecGroupInfo.ForeColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
+$tabSecGroup.Controls.Add($lblSecGroupInfo)
 
-$tabControl.TabPages.Add($tabESlide)
+$tabControl.TabPages.Add($tabSecGroup)
 
 # Hide Security Group tab if no group is configured
 if (-not $Config.SecurityGroupDN) {
-    $tabControl.TabPages.Remove($tabESlide)
+    $tabControl.TabPages.Remove($tabSecGroup)
 }
 
 $form.Controls.Add($tabControl)
@@ -1091,7 +1172,7 @@ $btnEditUser.Add_Click({
         }
         
         try {
-            Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+            Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
                 param($sam, $newFirst, $newLast, $newDisplay, $newEmail, $newTitle, $newDept, $newPhone, $newManagerDN, $originalEmail)
                 
                 Import-Module ActiveDirectory
@@ -1187,7 +1268,7 @@ $btnCreateUser.Add_Click({
         $neverExpires = $chkPasswordNeverExpires.Checked
         $standardOU = $Config.StandardUsersOU
         $secGroupDN = $Config.SecurityGroupDN
-        $addToGroup = $chkESlideAccess.Checked
+        $addToGroup = $chkSecGroupAccess.Checked
         
         $managerDN = $null
         if ($script:cmbManager.SelectedItem -and $script:cmbManager.SelectedItem -ne "") {
@@ -1196,7 +1277,7 @@ $btnCreateUser.Add_Click({
         
         Set-Progress -Percent 50 -Status "Creating in AD..."
         
-        $result = Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+        $result = Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
             param($username, $displayName, $email, $upn, $firstName, $lastName, $title, $department, $phone, $password, $mustChange, $neverExpires, $standardOU, $secGroupDN, $addToGroup, $managerDN)
             
             Import-Module ActiveDirectory
@@ -1247,10 +1328,8 @@ $btnCreateUser.Add_Click({
             Write-Log "Created user: $username ($displayName)"
             if ($addToGroup) { Write-Log "Added $username to $($Config.SecurityGroupName) group" }
             
-            [System.Windows.Forms.MessageBox]::Show(
-                "User '$displayName' created successfully!`n`nUsername: $username`nEmail: $email`nPassword: $password",
-                "Success", "OK", "Information"
-            )
+            Show-PasswordResult -Password $password -Message `
+                "User '$displayName' created successfully!`n`nUsername: $username`nEmail: $email`nPassword: $password"
             
             $btnClearForm.PerformClick()
             Refresh-UserList
@@ -1279,7 +1358,7 @@ $btnClearForm.Add_Click({
     $txtNewPassword.Text = ""
     $txtPrimaryEmail.Text = ""
     $script:cmbManager.SelectedIndex = -1
-    $chkESlideAccess.Checked = $false
+    $chkSecGroupAccess.Checked = $false
 })
 
 # Reset Password
@@ -1302,7 +1381,7 @@ $btnResetPassword.Add_Click({
         Set-Progress -Percent 50 -Status "Resetting..."
         try {
             $sam = $user.SamAccountName
-            Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+            Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
                 param($sam, $newPassword)
                 Import-Module ActiveDirectory
                 Set-ADAccountPassword -Identity $sam -Reset -NewPassword (ConvertTo-SecureString $newPassword -AsPlainText -Force)
@@ -1311,10 +1390,8 @@ $btnResetPassword.Add_Click({
             
             Write-Log "Password reset for $sam"
             
-            [System.Windows.Forms.MessageBox]::Show(
-                "Password reset successful!`n`nNew Password: $newPassword`n`nUser must change password at next login.",
-                "Success", "OK", "Information"
-            )
+            Show-PasswordResult -Password $newPassword -Message `
+                "Password reset successful!`n`nNew Password: $newPassword`n`nUser must change password at next login."
         }
         catch {
             Write-Log "Error resetting password: $_" "ERROR"
@@ -1346,7 +1423,7 @@ $btnDisableUser.Add_Click({
             $dn = $user.DistinguishedName
             $disabledOU = $Config.DisabledUsersOU
             
-            Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+            Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
                 param($sam, $dn, $disabledOU)
                 Import-Module ActiveDirectory
                 Disable-ADAccount -Identity $sam
@@ -1394,7 +1471,7 @@ $btnEnableUser.Add_Click({
             $dn = $user.DistinguishedName
             $standardOU = $Config.StandardUsersOU
             
-            Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+            Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
                 param($sam, $dn, $standardOU)
                 Import-Module ActiveDirectory
                 Enable-ADAccount -Identity $sam
@@ -1420,20 +1497,20 @@ $btnEnableUser.Add_Click({
 # ============================================================================
 
 # Load Membership Status
-$btnLoadESlide.Add_Click({
+$btnLoadSecGroup.Add_Click({
     Reset-InactivityTimer
-    if ($script:cmbESlideUser.SelectedItem -eq $null) {
+    if ($script:cmbSecGroupUser.SelectedItem -eq $null) {
         [System.Windows.Forms.MessageBox]::Show("Please select a user.", "Warning", "OK", "Warning")
         return
     }
     
-    $username = ($script:cmbESlideUser.SelectedItem -split " - ")[0]
+    $username = ($script:cmbSecGroupUser.SelectedItem -split " - ")[0]
     $secGroupDN = $Config.SecurityGroupDN
     
     Set-Progress -Percent 50 -Status "Loading..."
     
     try {
-        $isMember = Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+        $isMember = Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
             param($username, $secGroupDN)
             Import-Module ActiveDirectory
             $members = Get-ADGroupMember -Identity $secGroupDN -ErrorAction SilentlyContinue
@@ -1441,45 +1518,45 @@ $btnLoadESlide.Add_Click({
         } -ArgumentList $username, $secGroupDN
         
         if ($isMember) {
-            $lblESlideStatus.Text = "Current Status: MEMBER"
-            $lblESlideStatus.ForeColor = [System.Drawing.Color]::FromArgb(16, 124, 16)
+            $lblSecGroupStatus.Text = "Current Status: MEMBER"
+            $lblSecGroupStatus.ForeColor = [System.Drawing.Color]::FromArgb(16, 124, 16)
         }
         else {
-            $lblESlideStatus.Text = "Current Status: NOT A MEMBER"
-            $lblESlideStatus.ForeColor = [System.Drawing.Color]::FromArgb(209, 52, 56)
+            $lblSecGroupStatus.Text = "Current Status: NOT A MEMBER"
+            $lblSecGroupStatus.ForeColor = [System.Drawing.Color]::FromArgb(209, 52, 56)
         }
         Write-Log "Loaded group membership status for $username"
     }
     catch {
         Write-Log "Error checking group membership: $_" "ERROR"
-        $lblESlideStatus.Text = "Current Status: Error loading"
-        $lblESlideStatus.ForeColor = [System.Drawing.Color]::Gray
+        $lblSecGroupStatus.Text = "Current Status: Error loading"
+        $lblSecGroupStatus.ForeColor = [System.Drawing.Color]::Gray
     }
     Reset-Progress
 })
 
 # Add to Group
-$btnGrantESlide.Add_Click({
+$btnGrantSecGroup.Add_Click({
     Reset-InactivityTimer
-    if ($script:cmbESlideUser.SelectedItem -eq $null) {
+    if ($script:cmbSecGroupUser.SelectedItem -eq $null) {
         [System.Windows.Forms.MessageBox]::Show("Please select a user and click Load first.", "Warning", "OK", "Warning")
         return
     }
     
-    $username = ($script:cmbESlideUser.SelectedItem -split " - ")[0]
+    $username = ($script:cmbSecGroupUser.SelectedItem -split " - ")[0]
     $secGroupDN = $Config.SecurityGroupDN
     
     Set-Progress -Percent 50 -Status "Adding..."
     
     try {
-        Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+        Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
             param($username, $secGroupDN)
             Import-Module ActiveDirectory
             Add-ADGroupMember -Identity $secGroupDN -Members $username
         } -ArgumentList $username, $secGroupDN
         
         Write-Log "Added $username to $($Config.SecurityGroupName) group"
-        $btnLoadESlide.PerformClick()
+        $btnLoadSecGroup.PerformClick()
         [System.Windows.Forms.MessageBox]::Show("User added to $($Config.SecurityGroupName) group.", "Success", "OK", "Information")
     }
     catch {
@@ -1495,14 +1572,14 @@ $btnGrantESlide.Add_Click({
 })
 
 # Remove from Group
-$btnRevokeESlide.Add_Click({
+$btnRevokeSecGroup.Add_Click({
     Reset-InactivityTimer
-    if ($script:cmbESlideUser.SelectedItem -eq $null) {
+    if ($script:cmbSecGroupUser.SelectedItem -eq $null) {
         [System.Windows.Forms.MessageBox]::Show("Please select a user and click Load first.", "Warning", "OK", "Warning")
         return
     }
     
-    $username = ($script:cmbESlideUser.SelectedItem -split " - ")[0]
+    $username = ($script:cmbSecGroupUser.SelectedItem -split " - ")[0]
     $secGroupDN = $Config.SecurityGroupDN
     
     $result = [System.Windows.Forms.MessageBox]::Show(
@@ -1513,14 +1590,14 @@ $btnRevokeESlide.Add_Click({
     if ($result -eq "Yes") {
         Set-Progress -Percent 50 -Status "Removing..."
         try {
-            Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+            Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
                 param($username, $secGroupDN)
                 Import-Module ActiveDirectory
                 Remove-ADGroupMember -Identity $secGroupDN -Members $username -Confirm:$false
             } -ArgumentList $username, $secGroupDN
             
             Write-Log "Removed $username from $($Config.SecurityGroupName) group"
-            $btnLoadESlide.PerformClick()
+            $btnLoadSecGroup.PerformClick()
             [System.Windows.Forms.MessageBox]::Show("User removed from $($Config.SecurityGroupName) group.", "Success", "OK", "Information")
         }
         catch {
@@ -1538,7 +1615,7 @@ $btnRevokeESlide.Add_Click({
 $form.Add_Shown({
     $script:inactivityTimer.Start()
     
-    Write-Log "AD User Management Tool v1.0 started"
+    Write-Log "AD User Management Tool v$($script:Version) started"
     Write-Log "Authenticated user: $($script:AuthenticatedUser)"
     Write-Log "Domain Controller: $($Config.DomainController)"
     Write-Log "Session timeout: $($Config.SessionTimeoutMinutes) minutes"
@@ -1547,7 +1624,7 @@ $form.Add_Shown({
         Write-Log "Testing connection to domain controller..."
         Set-Progress -Percent 20 -Status "Connecting to DC..."
         
-        $testConnection = Invoke-Command -ComputerName $Config.DomainController -ScriptBlock { 
+        $testConnection = Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock { 
             Import-Module ActiveDirectory
             return $true 
         } -ErrorAction Stop
@@ -1555,7 +1632,7 @@ $form.Add_Shown({
         
         Set-Progress -Percent 40 -Status "Loading managers..."
         
-        $managers = Invoke-Command -ComputerName $Config.DomainController -ScriptBlock {
+        $managers = Invoke-Command -ComputerName $Config.DomainController -Credential $script:Credential -ScriptBlock {
             param($standardOU)
             Import-Module ActiveDirectory
             Get-ADUser -Filter "Enabled -eq `$true" -SearchBase $standardOU -Properties DisplayName |
@@ -1570,7 +1647,7 @@ $form.Add_Shown({
         
         foreach ($mgr in $managers) {
             if ($Config.SecurityGroupDN) {
-                $script:cmbESlideUser.Items.Add("$($mgr.SamAccountName) - $($mgr.DisplayName)")
+                $script:cmbSecGroupUser.Items.Add("$($mgr.SamAccountName) - $($mgr.DisplayName)")
             }
         }
         
