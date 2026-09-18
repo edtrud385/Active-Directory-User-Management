@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-09-18
+
+### Fixed
+- **Configuration wizard was unusable** - the form was too short, leaving the Session Timeout field and the Save/Cancel buttons off the bottom edge. Field hints for the wide DN fields also ran past the right edge. Layout now fits; Enter saves and Esc cancels.
+- Generated passwords could miss a character class (about 1 in 25) and be rejected by AD's complexity policy. Each password now contains at least one lowercase, uppercase, digit, and symbol.
+- Closing the login window printed a red "Login cancelled" error to the console instead of exiting quietly.
+
+### Changed
+- **Login credentials are now used for AD operations.** Previously the login screen only verified the password and every remoting call ran as the Windows user who launched the tool. All `Invoke-Command` calls now pass the signed-in credential, so technicians can run the tool from a standard desktop session and sign in with a delegated admin account. Re-authentication after a timeout replaces the stored credential.
+- Password generation uses `System.Security.Cryptography.RandomNumberGenerator` instead of `Get-Random`.
+- Create User and Reset Password success dialogs offer to copy the password to the clipboard (opt-in, never automatic).
+- Version is defined once (`$script:Version`) and shown consistently in the title bar and log.
+- Main script has comment-based help (`Get-Help .\AD-UserManagement.ps1`).
+- Wizard no longer claims to need elevation; it only writes `config.json` next to itself.
+- Internal control names no longer reference a pre-release product name.
+
+### Documentation
+- README and SETUP.md describe the credential model accurately, and note the execution-policy bypass needed on machines with the default `Restricted` policy.
+- SETUP.md troubleshooting covers WinRM rejecting credentials that passed the domain check.
+
 ## [1.0.0] - 2026-03-24
 
 ### Added
