@@ -61,6 +61,59 @@ A PowerShell-based GUI tool for managing Active Directory users and security gro
 
 See [SETUP.md](SETUP.md) for detailed setup instructions, including how to find your OU distinguished names and configure delegation.
 
+## Walkthrough
+
+### 1. Configuration wizard (`Configure-ADUserMgmt.ps1`)
+
+A single dialog with a blue header bar and three sections:
+
+- **Active Directory** - Domain Controller FQDN, AD Domain FQDN (used for sign-in), Email Domain
+- **Organizational Units** - Standard Users OU and Disabled Users OU, as distinguished names
+- **Security Group Membership (Optional)** - the group's DN and a friendly display name; leave the DN blank to hide the Security Group tab
+- **Session Timeout** - 1 to 120 minutes, default 10
+
+Each field has a gray hint beside its label showing the expected format. **Save Configuration** validates the required fields, writes `config.json` beside the script, and confirms the path. Re-running the wizard pre-fills the saved values. Enter saves, Esc cancels.
+
+### 2. Sign in
+
+Launching `AD-UserManagement.ps1` opens a sign-in dialog: a **Username** box pre-filled with your Windows username (the email domain is shown beneath it), a **Password** box, and a **Sign In** button (Enter submits). The credentials are verified against the domain and then used for every AD operation, so you can sign in with a delegated admin account while logged on to Windows as a standard user. A wrong password shows "Invalid username or password." and clears the password box; closing the dialog exits the tool.
+
+After the inactivity timeout the main window hides and this dialog reappears with "Session timed out. Please sign in again." Signing in resumes where you left off.
+
+### 3. Main window
+
+The title bar shows the version and the signed-in account. The window is resizable and has three areas:
+
+- **Tabs** filling most of the window: *User Management*, *Create New User*, and (when a group is configured) *Security Group*
+- A **progress bar** with a status label ("Ready", "Querying AD...", "Resetting...")
+- An **Activity Log** along the bottom with timestamped `[INFO]` / `[ERROR]` lines for every operation
+
+On open the tool tests the DC connection, loads the manager list, and fills the user list. If the connection fails, a message box lists the usual causes (network, WinRM, permissions).
+
+### 4. User Management tab
+
+Top row: a **Search** box that filters the list as you type (username, display name, title, email), a **Show Disabled Users** checkbox that switches the list from the Standard Users OU to the Disabled Users OU, and **Refresh**.
+
+Left: a grid of Username / Display Name / Title / Status. Right: an **Actions** panel with **Reset Password**, **Disable User**, **Enable User**, and **Edit User**, above a read-only **Selected User Details** box showing the highlighted user's username, display name, title, department, phone, email, status, and proxyAddress aliases.
+
+- **Reset Password** generates a password and shows it in a confirmation prompt. On Yes it sets the password with *must change at next logon* and shows it once more with an offer to copy it to the clipboard.
+- **Disable User** confirms, then disables the account and moves it to the Disabled Users OU. **Enable User** does the reverse - tick *Show Disabled Users* to find the account first.
+- **Edit User** opens a dialog with First / Last / Display Name, Email / UPN (with a warning that changing it affects sign-in), Title, Department, Phone, and a Manager dropdown. **Save Changes** writes the attributes; if the email changed it also updates the UPN, `mail`, and the primary SMTP entry in `proxyAddresses`.
+
+### 5. Create New User tab
+
+Three group boxes:
+
+- **User Information** - First Name and Last Name (required; typing both auto-fills **Username** as `first.last` and the primary email), Title, Department, Phone, a Manager dropdown of active users, and Password with a **Generate** button
+- **Security Group Membership** - one checkbox to add the new user to the configured group (hidden when no group is configured)
+- **Email Configuration** - Primary Email (SMTP), auto-generated from the username but editable, plus *User must change password at next logon* and *Password never expires*
+
+**Create User** creates the account in the Standard Users OU, sets UPN, `mail`, and `proxyAddresses` in one step, assigns the manager, adds the group membership if ticked, and shows the username, email, and password with an offer to copy the password. **Clear Form** resets every field.
+
+### 6. Security Group tab
+
+Shown only when `SecurityGroupDN` is set. Pick a user from the dropdown and click **Load** to see *Current Status: MEMBER* or *NOT A MEMBER*, then **Add to Group** or **Remove from Group** (removal asks for confirmation). Each change is written to the Activity Log.
+
 ## Permissions and Delegation
 
 **This tool does not enforce its own access control.** The login screen verifies the credentials against the domain and then uses them for every AD operation, but it does not check group membership. Access control is handled entirely by Active Directory permissions. If a user without the proper delegated rights signs in, they will authenticate successfully but every AD operation will fail with "Access Denied."

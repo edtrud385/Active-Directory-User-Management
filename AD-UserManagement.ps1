@@ -351,22 +351,19 @@ function Reset-Progress {
     }
 }
 
-function Refresh-UserList {
-    Set-Progress -Percent 10 -Status "Loading..."
+function Update-UserListView {
+    # Re-render the list from the cached AD result, optionally filtered by the
+    # search box. Matches against username, display name, title, and email.
+    param([string]$Filter = "")
+    $Filter = $Filter.Trim()
+    $script:lstUsers.BeginUpdate()
     $script:lstUsers.Items.Clear()
-    $searchBase = if ($script:chkShowDisabled.Checked) { 
-        $Config.DisabledUsersOU 
-    } else { 
-        $Config.StandardUsersOU 
-    }
-    
-    Set-Progress -Percent 30 -Status "Querying AD..."
-    $users = Get-ADUsersList -SearchBase $searchBase -IncludeDisabled $script:chkShowDisabled.Checked
-    
-    Set-Progress -Percent 70 -Status "Populating..."
-    $totalUsers = $users.Count
-    $i = 0
-    foreach ($user in $users) {
+    if ($script:txtUserDetails) { $script:txtUserDetails.Text = "" }
+    foreach ($user in $script:allUsers) {
+        if ($Filter) {
+            $haystack = "$($user.SamAccountName) $($user.DisplayName) $($user.Title) $($user.mail)"
+            if ($haystack.IndexOf($Filter, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+        }
         $status = if ($user.Enabled) { "Active" } else { "Disabled" }
         $item = New-Object System.Windows.Forms.ListViewItem($user.SamAccountName)
         $item.SubItems.Add([string]$user.DisplayName)
@@ -374,14 +371,25 @@ function Refresh-UserList {
         $item.SubItems.Add($status)
         $item.Tag = $user
         $script:lstUsers.Items.Add($item)
-        $i++
-        if ($i % 10 -eq 0) {
-            $pct = 70 + [int](($i / $totalUsers) * 30)
-            Set-Progress -Percent $pct -Status "Loading $i/$totalUsers"
-        }
     }
+    $script:lstUsers.EndUpdate()
+}
+
+function Refresh-UserList {
+    Set-Progress -Percent 10 -Status "Loading..."
+    $searchBase = if ($script:chkShowDisabled.Checked) { 
+        $Config.DisabledUsersOU 
+    } else { 
+        $Config.StandardUsersOU 
+    }
+    
+    Set-Progress -Percent 30 -Status "Querying AD..."
+    $script:allUsers = @(Get-ADUsersList -SearchBase $searchBase -IncludeDisabled $script:chkShowDisabled.Checked)
+    
+    Set-Progress -Percent 70 -Status "Populating..."
+    Update-UserListView -Filter $script:txtSearch.Text
     Reset-Progress
-    Write-Log "Refreshed user list: $($users.Count) users found"
+    Write-Log "Refreshed user list: $($script:allUsers.Count) users found"
 }
 
 function Reset-InactivityTimer {
@@ -464,10 +472,13 @@ $lblSearch.Location = New-Object System.Drawing.Point(0, 10)
 $lblSearch.AutoSize = $true
 $pnlSearch.Controls.Add($lblSearch)
 
-$txtSearch = New-Object System.Windows.Forms.TextBox
+$script:txtSearch = New-Object System.Windows.Forms.TextBox
 $txtSearch.Location = New-Object System.Drawing.Point(55, 7)
 $txtSearch.Size = New-Object System.Drawing.Size(200, 25)
-$txtSearch.Add_TextChanged({ Reset-InactivityTimer })
+$txtSearch.Add_TextChanged({
+    Reset-InactivityTimer
+    Update-UserListView -Filter $txtSearch.Text
+})
 $pnlSearch.Controls.Add($txtSearch)
 
 $script:chkShowDisabled = New-Object System.Windows.Forms.CheckBox
@@ -558,7 +569,7 @@ $lblSelectedUser.Location = New-Object System.Drawing.Point(10, 135)
 $lblSelectedUser.AutoSize = $true
 $pnlActions.Controls.Add($lblSelectedUser)
 
-$txtUserDetails = New-Object System.Windows.Forms.TextBox
+$script:txtUserDetails = New-Object System.Windows.Forms.TextBox
 $txtUserDetails.Location = New-Object System.Drawing.Point(10, 160)
 $txtUserDetails.Size = New-Object System.Drawing.Size(305, 175)
 $txtUserDetails.Multiline = $true
