@@ -20,7 +20,7 @@ All notable changes to this project will be documented in this file.
 - Internal control names no longer reference a pre-release product name.
 
 ### Documentation
-- README has a screen-by-screen walkthrough of the wizard, sign-in, and each tab.
+- README has a screen-by-screen walkthrough of the wizard, sign-in, and each tab, with screenshots.
 - README and SETUP.md describe the credential model accurately, and note the execution-policy bypass needed on machines with the default `Restricted` policy.
 - SETUP.md troubleshooting covers WinRM rejecting credentials that passed the domain check.
 

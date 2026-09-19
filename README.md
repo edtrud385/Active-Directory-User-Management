@@ -8,6 +8,8 @@ A PowerShell-based GUI tool for managing Active Directory users and security gro
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
+![AD User Management main window](images/user-management.png)
+
 ## Features
 
 **User Management**
@@ -72,9 +74,15 @@ A single dialog with a blue header bar and three sections:
 - **Security Group Membership (Optional)** - the group's DN and a friendly display name; leave the DN blank to hide the Security Group tab
 - **Session Timeout** - 1 to 120 minutes, default 10
 
+![Configuration wizard](images/wizard.png)
+
 Each field has a gray hint beside its label showing the expected format. **Save Configuration** validates the required fields, writes `config.json` beside the script, and confirms the path. Re-running the wizard pre-fills the saved values. Enter saves, Esc cancels.
 
+<img src="images/wizard-saved.png" alt="Configuration saved dialog" width="520">
+
 ### 2. Sign in
+
+<img src="images/login.png" alt="Sign-in dialog" width="430">
 
 Launching `AD-UserManagement.ps1` opens a sign-in dialog: a **Username** box pre-filled with your Windows username (the email domain is shown beneath it), a **Password** box, and a **Sign In** button (Enter submits). The credentials are verified against the domain and then used for every AD operation, so you can sign in with a delegated admin account while logged on to Windows as a standard user. A wrong password shows "Invalid username or password." and clears the password box; closing the dialog exits the tool.
 
@@ -82,7 +90,9 @@ After the inactivity timeout the main window hides and this dialog reappears wit
 
 ### 3. Main window
 
-The title bar shows the version and the signed-in account. The window is resizable and has three areas:
+![Main window on the User Management tab](images/user-management.png)
+
+The title bar shows the version and the signed-in account. The window opens on the User Management tab, is resizable, and has three areas:
 
 - **Tabs** filling most of the window: *User Management*, *Create New User*, and (when a group is configured) *Security Group*
 - A **progress bar** with a status label ("Ready", "Querying AD...", "Resetting...")
@@ -102,6 +112,8 @@ Left: a grid of Username / Display Name / Title / Status. Right: an **Actions** 
 
 ### 5. Create New User tab
 
+![Create New User tab](images/create-user.png)
+
 Three group boxes:
 
 - **User Information** - First Name and Last Name (required; typing both auto-fills **Username** as `first.last` and the primary email), Title, Department, Phone, a Manager dropdown of active users, and Password with a **Generate** button
@@ -111,6 +123,8 @@ Three group boxes:
 **Create User** creates the account in the Standard Users OU, sets UPN, `mail`, and `proxyAddresses` in one step, assigns the manager, adds the group membership if ticked, and shows the username, email, and password with an offer to copy the password. **Clear Form** resets every field.
 
 ### 6. Security Group tab
+
+![Security Group tab](images/security-group.png)
 
 Shown only when `SecurityGroupDN` is set. Pick a user from the dropdown and click **Load** to see *Current Status: MEMBER* or *NOT A MEMBER*, then **Add to Group** or **Remove from Group** (removal asks for confirmation). Each change is written to the Activity Log.
 
@@ -170,6 +184,7 @@ Active-Directory-User-Management/
   config.json                  Generated config (gitignored)
   README.md                    This file
   SETUP.md                     Detailed setup and delegation guide
+  images/                      README screenshots
   CHANGELOG.md                 Version history
   LICENSE                      MIT License
   .gitignore                   Excludes config.json
