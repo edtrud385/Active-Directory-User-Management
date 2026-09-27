@@ -1,5 +1,16 @@
 # AD User Management Tool
 
+> [!WARNING]
+> **This project is archived and no longer maintained. It is not recommended for production use.**
+>
+> Known issues that will not be fixed:
+> - **Failed operations can be reported as successful.** Remote errors from the AD cmdlets are not treated as terminating, so an "Access Denied" password reset, disable, or create can still show a success message.
+> - **It requires technicians to have remote PowerShell access to domain controllers** (membership in the DC's *Remote Management Users* group), which gives a helpdesk identity code execution on a Tier 0 system.
+> - **The recommended delegation is broader than necessary.** "Write All Properties" on user objects allows writes to attributes such as `msDS-KeyCredentialLink`, `servicePrincipalName`, and `altSecurityIdentities`, which enable account takeover.
+> - Saving the Edit User dialog clears the user's manager unless one is re-selected.
+>
+> The code remains available for reference under the MIT license.
+
 Read the blog post that inspired the tool: https://trgsys.com/blog/ad-user-management-blog
 
 A PowerShell-based GUI tool for managing Active Directory users and security group membership. Designed for IT administrators and helpdesk staff who need a simple, consistent interface for common AD tasks without requiring RSAT or direct access to Active Directory Users and Computers.
