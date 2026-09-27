@@ -11,8 +11,6 @@
 >
 > The code remains available for reference under the MIT license.
 
-Read the blog post that inspired the tool: https://trgsys.com/blog/ad-user-management-blog
-
 A PowerShell-based GUI tool for managing Active Directory users and security group membership. Designed for IT administrators and helpdesk staff who need a simple, consistent interface for common AD tasks without requiring RSAT or direct access to Active Directory Users and Computers.
 
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue)
